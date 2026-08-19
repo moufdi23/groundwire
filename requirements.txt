@@ -1,0 +1,10 @@
+supabase==2.10.0
+python-dotenv==1.0.1
+sentence-transformers==3.0.1
+beautifulsoup4==4.12.3
+requests==2.32.3
+
+# psycopg2-binary — needed only for direct DB connections (Day 2+).
+# No pre-built wheel for Python 3.14 yet; install manually when ready:
+#   pip install psycopg2-binary  (needs PostgreSQL headers, or install PostgreSQL first)
+# Alternatively use:  pip install "psycopg[binary]"  (psycopg v3, has 3.14 wheels)
