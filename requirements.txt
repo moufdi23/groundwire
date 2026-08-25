@@ -5,6 +5,7 @@ langchain-text-splitters==0.3.8
 tqdm>=4.67.0
 beautifulsoup4==4.12.3
 requests==2.32.3
+rank-bm25==0.2.2
 
 # psycopg2-binary — needed only for direct DB connections (Day 2+).
 # No pre-built wheel for Python 3.14 yet; install manually when ready:
