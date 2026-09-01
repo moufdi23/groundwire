@@ -7,6 +7,17 @@ beautifulsoup4==4.12.3
 requests==2.32.3
 rank-bm25==0.2.2
 
+# Day 7: answer generation + Ragas-equivalent evaluation
+anthropic                # Anthropic Python SDK — generate_answer.py + evaluate_ragas.py use Haiku directly
+
+# ragas / langchain-anthropic / langchain-huggingface: CANNOT be installed on Python 3.14 / Windows.
+#   ragas 0.4.3 depends on scikit-network (no py3.14 wheel; needs MSVC C++ build tools).
+#   ragas 0.4.3 --no-deps hard-imports langchain_community.chat_models.vertexai, which was
+#   removed in langchain-community >=0.3 — an irresolvable version conflict.
+#   Resolution: evaluate_ragas.py implements the 4 metrics (Faithfulness, AnswerRelevancy,
+#   ContextPrecision, ContextRecall) directly with Claude Haiku using the same math Ragas uses.
+#   To try ragas on a system with MSVC: pip install ragas langchain-anthropic langchain-huggingface
+
 # psycopg2-binary — needed only for direct DB connections (Day 2+).
 # No pre-built wheel for Python 3.14 yet; install manually when ready:
 #   pip install psycopg2-binary  (needs PostgreSQL headers, or install PostgreSQL first)

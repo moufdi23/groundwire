@@ -61,3 +61,27 @@ Questions with 0 recall: **1/80**
 - Candidate pool: top-50 from hybrid RRF, then re-scored and re-sorted by cross-encoder.
 - Hybrid: vector (pgvector cosine) + BM25 (rank_bm25), fused with RRF k=60.
 - Reranking improves precision by surfacing the most semantically relevant chunk first.
+
+
+## Day 7 — Generation Quality (Ragas)
+
+Sample: 25/80 questions · random seed 42 · k=3 chunks
+Generator: Claude Haiku 4.5 (`claude-haiku-4-5`)
+Judge: Claude Haiku 4.5 · Embeddings: `sentence-transformers/all-MiniLM-L6-v2` (for Answer Relevancy)
+
+| Metric | Score | Definition |
+|--------|-------|------------|
+| Faithfulness | 0.9619 | Fraction of answer claims grounded in the retrieved context |
+| Answer Relevancy | 0.7518 | Mean cosine sim(original question, reverse-generated questions) |
+| Context Precision | 0.9367 | Average precision of context ranking (relevant chunks first) |
+| Context Recall | 0.9233 | Fraction of ground-truth sentences attributable to context |
+
+### Metric Methodology
+Implemented using the same formulas as the Ragas library (ragas.ai).
+Ragas 0.4.3 could not be installed on Python 3.14 / Windows (scikit-network
+requires MSVC C++ build tools; langchain-community version conflict).
+
+- **Faithfulness**: Extract claims → check each against context via LLM.
+- **Answer Relevancy**: LLM generates 3 reverse-questions → cosine similarity with original.
+- **Context Precision**: LLM judges chunk relevance per position → compute Average Precision.
+- **Context Recall**: LLM checks which ground-truth sentences appear in context.
