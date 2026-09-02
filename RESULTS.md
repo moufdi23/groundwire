@@ -85,3 +85,13 @@ requires MSVC C++ build tools; langchain-community version conflict).
 - **Answer Relevancy**: LLM generates 3 reverse-questions → cosine similarity with original.
 - **Context Precision**: LLM judges chunk relevance per position → compute Average Precision.
 - **Context Recall**: LLM checks which ground-truth sentences appear in context.
+
+## Day 8 — CI Regression Gate (GitHub Actions)
+
+To protect retrieval quality going forward, a GitHub Actions workflow (`eval-gate.yml`) now runs `scripts/regression_check.py` on every push and pull request to `main`. The script re-runs the full hybrid + reranking evaluation against all 80 golden-set questions — no Claude API calls, only local embeddings and Supabase — and compares the results against fixed minimum thresholds (recall@3 ≥ 0.88, recall@10 ≥ 0.95, precision@3 ≥ 0.75), each set ~3 points below the current Day-6 scores to allow minor variance while catching genuine regressions. If any threshold is breached the script exits with code 1, which GitHub Actions treats as a failure and blocks the merge with a red ✗. This turns retrieval quality from a metric you check manually once per sprint into an automated safety net: any change to chunking, embedding, BM25 weights, or reranking logic that silently degrades recall will be caught before it reaches `main`.
+
+| Metric | Threshold | Day-6 Score |
+|--------|-----------|-------------|
+| recall@3 | ≥ 0.88 | 0.9125 |
+| recall@10 | ≥ 0.95 | 0.9875 |
+| precision@3 | ≥ 0.75 | 0.8042 |
