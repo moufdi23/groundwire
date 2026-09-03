@@ -1,4 +1,4 @@
-supabase==2.10.0
+supabase==2.31.0
 python-dotenv==1.0.1
 sentence-transformers==3.0.1
 langchain-text-splitters==0.3.8
