@@ -1,5 +1,7 @@
 # groundwire
 
+![Retrieval Regression Gate](https://github.com/moufdi23/groundwire/actions/workflows/eval-gate.yml/badge.svg)
+
 A production-grade AI support agent built with RAG, tool use, evaluations, and MCP — designed as a portfolio project demonstrating end-to-end LLM system design.
 
 ## What it does
