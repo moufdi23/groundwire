@@ -10,6 +10,12 @@ rank-bm25==0.2.2
 # Day 7: answer generation + Ragas-equivalent evaluation
 anthropic                # Anthropic Python SDK — generate_answer.py + evaluate_ragas.py use Haiku directly
 
+# Day 9: LangGraph agent
+# Both install cleanly on Python 3.14 / Windows — no C-extension wheels, pure Python.
+# No conflicts with the existing stack.
+langgraph==1.2.11
+langchain-anthropic==1.7.0
+
 # ragas / langchain-anthropic / langchain-huggingface: CANNOT be installed on Python 3.14 / Windows.
 #   ragas 0.4.3 depends on scikit-network (no py3.14 wheel; needs MSVC C++ build tools).
 #   ragas 0.4.3 --no-deps hard-imports langchain_community.chat_models.vertexai, which was
