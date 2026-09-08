@@ -1,8 +1,9 @@
 """
-LangGraph agent: retrieve → generate → check_confidence → END.
+LangGraph agent: retrieve → generate → check_confidence → (resolve | handle_escalation) → END.
 
-Day 9: proves state flows correctly through a linear graph.
-Tool-calling (create_ticket, check_status, escalate_to_human) is Day 10.
+Day 10: adds three Supabase-backed tools and conditional routing after check_confidence.
+  - needs_escalation=False  →  resolve          (create_ticket, status='auto_resolved')
+  - needs_escalation=True   →  handle_escalation (escalate_to_human, status='escalated')
 
 Public API
 ----------
@@ -15,6 +16,7 @@ AgentState keys in the result dict:
   retrieved_context  — top-3 reranked chunks (each has id, source_file, content, ...)
   answer             — Claude Haiku's generated answer
   needs_escalation   — True when the answer signals low confidence
+  ticket             — the ticket row returned from Supabase (includes id and status)
 """
 
 import operator
@@ -30,6 +32,7 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent))
 from reranked_search import reranked_retrieve
+from tools import create_ticket, escalate_to_human
 
 # ── Anthropic client (lazy singleton) ─────────────────────────────────────────
 
@@ -46,13 +49,12 @@ def _get_client() -> anthropic.Anthropic:
 # ── State ──────────────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
-    # Annotated with operator.add so each node that appends to messages uses
-    # LangGraph's reducer (new list is concatenated, not replaced).
     messages: Annotated[list[dict], operator.add]
     question: str
     retrieved_context: list[dict]
     answer: str
     needs_escalation: bool
+    ticket: dict          # populated by resolve or handle_escalation
 
 
 # ── Prompts & config ───────────────────────────────────────────────────────────
@@ -80,13 +82,11 @@ _ESCALATION_PHRASES = (
 # ── Node functions ─────────────────────────────────────────────────────────────
 
 def retrieve(state: AgentState) -> dict:
-    """Hybrid + cross-encoder retrieval; stores top-3 chunks in state."""
     chunks = reranked_retrieve(state["question"], k=3)
     return {"retrieved_context": chunks}
 
 
 def generate(state: AgentState) -> dict:
-    """Calls Claude Haiku with retrieved context; stores answer and appends to messages."""
     chunks = state["retrieved_context"]
     context_block = "\n\n---\n\n".join(
         f"[Source {i + 1}: {c['source_file']}]\n{c['content']}"
@@ -111,13 +111,31 @@ def generate(state: AgentState) -> dict:
 
 
 def check_confidence(state: AgentState) -> dict:
-    """
-    Rule-based confidence check: if the answer signals uncertainty,
-    set needs_escalation=True so downstream routing (Day 10) can hand off.
-    """
     answer_lower = state["answer"].lower()
     escalate = any(phrase in answer_lower for phrase in _ESCALATION_PHRASES)
     return {"needs_escalation": escalate}
+
+
+def resolve(state: AgentState) -> dict:
+    """Confident answer: log to Supabase as auto_resolved."""
+    ticket = create_ticket(state["question"], state["answer"])
+    return {"ticket": ticket}
+
+
+def handle_escalation(state: AgentState) -> dict:
+    """Low-confidence answer: escalate to human queue in Supabase."""
+    ticket = escalate_to_human(
+        state["question"],
+        state["answer"],
+        reason="low confidence answer",
+    )
+    return {"ticket": ticket}
+
+
+# ── Routing ────────────────────────────────────────────────────────────────────
+
+def _route_after_confidence(state: AgentState) -> str:
+    return "handle_escalation" if state["needs_escalation"] else "resolve"
 
 
 # ── Graph ──────────────────────────────────────────────────────────────────────
@@ -127,11 +145,19 @@ _builder = StateGraph(AgentState)
 _builder.add_node("retrieve", retrieve)
 _builder.add_node("generate", generate)
 _builder.add_node("check_confidence", check_confidence)
+_builder.add_node("resolve", resolve)
+_builder.add_node("handle_escalation", handle_escalation)
 
 _builder.add_edge(START, "retrieve")
 _builder.add_edge("retrieve", "generate")
 _builder.add_edge("generate", "check_confidence")
-_builder.add_edge("check_confidence", END)
+_builder.add_conditional_edges(
+    "check_confidence",
+    _route_after_confidence,
+    {"resolve": "resolve", "handle_escalation": "handle_escalation"},
+)
+_builder.add_edge("resolve", END)
+_builder.add_edge("handle_escalation", END)
 
 app = _builder.compile()
 
@@ -141,11 +167,11 @@ app = _builder.compile()
 if __name__ == "__main__":
     _TEST_CASES = [
         {
-            "label": "Well-covered (confident answer expected)",
+            "label": "Well-covered (confident answer expected → auto_resolved)",
             "question": "What is Supabase?",
         },
         {
-            "label": "Oddly specific (escalation expected)",
+            "label": "Oddly specific (escalation expected → escalated)",
             "question": (
                 "What is the default timeout in milliseconds for the GoTrue JWT "
                 "validation middleware when running behind a Cloudflare Workers "
@@ -168,6 +194,7 @@ if __name__ == "__main__":
             "retrieved_context": [],
             "answer": "",
             "needs_escalation": False,
+            "ticket": {},
         }
 
         result = app.invoke(initial_state)
@@ -177,10 +204,19 @@ if __name__ == "__main__":
             if result["retrieved_context"]
             else "none"
         )
+        ticket = result.get("ticket", {})
+        ticket_id = ticket.get("id", "N/A")
+        ticket_status = ticket.get("status", "N/A")
+        path = "ESCALATED" if result["needs_escalation"] else "AUTO-RESOLVED"
 
         print(f"Answer:\n{result['answer']}")
         print()
         print(f"needs_escalation : {result['needs_escalation']}")
+        print(f"Path taken       : {path}")
+        print(f"Ticket id        : {ticket_id}")
+        print(f"Ticket status    : {ticket_status}")
         print(f"Top source chunk : {top_source}")
         print(f"Messages in history: {len(result['messages'])}")
+        if ticket.get("error"):
+            print(f"[WARN] Ticket error: {ticket['error']}")
         print()
