@@ -25,7 +25,10 @@ langchain-anthropic==1.7.0
 #   ContextPrecision, ContextRecall) directly with Claude Haiku using the same math Ragas uses.
 #   To try ragas on a system with MSVC: pip install ragas langchain-anthropic langchain-huggingface
 
-# psycopg2-binary — needed only for direct DB connections (Day 2+).
-# No pre-built wheel for Python 3.14 yet; install manually when ready:
-#   pip install psycopg2-binary  (needs PostgreSQL headers, or install PostgreSQL first)
-# Alternatively use:  pip install "psycopg[binary]"  (psycopg v3, has 3.14 wheels)
+# Day 12: persistent conversation memory via LangGraph checkpointer backed by Postgres.
+# langgraph-checkpoint-postgres 3.1.2 requires langgraph-checkpoint>=4.1.0 (we have 4.2.0 — ✓).
+# psycopg v3 (psycopg[binary]) has pre-built cp314 wheels on Windows — no MSVC needed.
+# psycopg2-binary has NO Python 3.14 wheel; use psycopg (v3) instead.
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary]>=3.2.0   # psycopg v3; binary extra pulls pre-built cp314 wheel
+psycopg-pool>=3.2.0      # connection pool used by PostgresSaver

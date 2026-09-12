@@ -3,12 +3,22 @@ LangGraph agent: classify_intent → (lookup_status | retrieve → generate → 
 
 Day 11: adds intent classification for status checks, retry logic with exponential backoff,
         output validation, and a tool-call safety counter.
+Day 12: persistent conversation memory via PostgresSaver checkpointer (Supabase Postgres).
+        generate() now includes up to 2 prior turns from state["messages"] so follow-up
+        questions like "what image formats does it support?" resolve correctly.
 
 Public API
 ----------
-app  — compiled LangGraph application.
-       Usage: result = app.invoke({"question": "What is Supabase?"})
-              result = app.invoke({"question": "What's the status of ticket 1?"})
+app  — compiled LangGraph application (with PostgresSaver checkpointer when
+       SUPABASE_DB_URL is set; stateless otherwise for backward compatibility).
+
+       Stateless usage (same as before):
+           result = app.invoke({"question": "What is Supabase?"})
+
+       Stateful usage (memory across calls):
+           cfg = {"configurable": {"thread_id": "my-session"}}
+           result = app.invoke({...}, config=cfg)
+           result = app.invoke({...}, config=cfg)   # remembers prior turn
 
 AgentState keys in the result dict:
   messages           — full conversation turn history (list of role/content dicts)
@@ -24,6 +34,7 @@ AgentState keys in the result dict:
 
 import logging
 import operator
+import os
 import re
 import sys
 import time
@@ -143,13 +154,32 @@ def retrieve(state: AgentState) -> dict:
 
 
 def generate(state: AgentState) -> dict:
-    """Call Claude with retry logic (3 attempts, 1s/2s exponential backoff)."""
+    """Call Claude with retry logic (3 attempts, 1s/2s exponential backoff).
+
+    Includes up to 2 prior conversation turns from state["messages"] so follow-up
+    questions (e.g. "what image formats does it support?") resolve correctly when
+    the agent is invoked with a thread_id and a checkpointer is attached.
+    """
     chunks = state["retrieved_context"]
     context_block = "\n\n---\n\n".join(
         f"[Source {i + 1}: {c['source_file']}]\n{c['content']}"
         for i, c in enumerate(chunks)
     )
-    user_message = f"Context:\n{context_block}\n\nQuestion: {state['question']}"
+    current_user_content = f"Context:\n{context_block}\n\nQuestion: {state['question']}"
+
+    # Build conversation history from prior turns.
+    # state["messages"] accumulates via operator.add: the last entry is the current
+    # user question; everything before it is history from previous invocations.
+    all_msgs = state.get("messages", [])
+    prior_msgs = all_msgs[:-1] if all_msgs else []
+    # Keep at most 4 messages (≈ 2 full turns: user + assistant each)
+    if len(prior_msgs) > 4:
+        prior_msgs = prior_msgs[-4:]
+
+    api_messages: list[dict] = [
+        {"role": m["role"], "content": m["content"]} for m in prior_msgs
+    ]
+    api_messages.append({"role": "user", "content": current_user_content})
 
     last_exc: Exception | None = None
     answer = ""
@@ -161,7 +191,7 @@ def generate(state: AgentState) -> dict:
                 model=_MODEL,
                 max_tokens=1024,
                 system=_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
+                messages=api_messages,
             )
             answer = next(
                 (block.text for block in response.content if block.type == "text"),
@@ -256,10 +286,83 @@ _builder.add_conditional_edges(
 _builder.add_edge("resolve", END)
 _builder.add_edge("handle_escalation", END)
 
-app = _builder.compile()
+# ── Checkpointer (Postgres-backed memory) ─────────────────────────────────────
+# Requires SUPABASE_DB_URL in .env (the direct Postgres connection string, NOT the
+# REST API URL).  Falls back to stateless if the variable is absent so existing
+# callers that don't set it keep working unchanged.
+
+_checkpointer = None
+_SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
+
+if _SUPABASE_DB_URL:
+    try:
+        from psycopg_pool import ConnectionPool
+        from psycopg.rows import dict_row
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        _pool = ConnectionPool(
+            conninfo=_SUPABASE_DB_URL,
+            max_size=5,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
+        _checkpointer = PostgresSaver(_pool)
+        _checkpointer.setup()   # creates langgraph_checkpoints table if not yet present
+        _log.info("PostgresSaver checkpointer ready.")
+    except Exception as _exc:
+        _log.warning("Checkpointer setup failed (%s); compiling without memory.", _exc)
+
+app = _builder.compile(checkpointer=_checkpointer)
 
 
 # ── Standalone test ────────────────────────────────────────────────────────────
+
+def _make_state(question: str) -> AgentState:
+    return {
+        "messages": [{"role": "user", "content": question}],
+        "question": question,
+        "retrieved_context": [],
+        "answer": "",
+        "needs_escalation": False,
+        "ticket": {},
+        "tool_calls": 0,
+        "path_taken": "",
+        "ticket_id_to_lookup": None,
+    }
+
+
+def _print_result(result: dict) -> None:
+    path = result.get("path_taken", "")
+    ticket = result.get("ticket", {})
+    if path == "status_lookup":
+        display_path = "STATUS-LOOKUP"
+    elif result["needs_escalation"]:
+        display_path = "ESCALATED"
+    else:
+        display_path = "AUTO-RESOLVED"
+
+    print(f"Path taken       : {display_path}")
+    print(f"Answer:\n{result['answer']}")
+    print()
+    print(f"needs_escalation : {result['needs_escalation']}")
+    print(f"Ticket id        : {ticket.get('id', 'N/A')}")
+    print(f"Ticket status    : {ticket.get('status', 'N/A')}")
+    print(f"Tool calls       : {result.get('tool_calls', 0)}")
+    if path != "status_lookup":
+        top_source = (
+            result["retrieved_context"][0]["source_file"]
+            if result["retrieved_context"]
+            else "none"
+        )
+        print(f"Top source chunk : {top_source}")
+    if path == "status_lookup":
+        found = ticket.get("found")
+        print(f"Ticket found     : {found}")
+        if found:
+            print(f"Ticket question  : {ticket.get('question', '')}")
+    print(f"Messages in history: {len(result['messages'])}")
+    if ticket.get("error"):
+        print(f"[WARN] Ticket error: {ticket['error']}")
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -285,61 +388,57 @@ if __name__ == "__main__":
 
     print("Loading retrieval models (first run takes ~30 s) …\n")
 
-    for case in _TEST_CASES:
+    for idx, case in enumerate(_TEST_CASES, 1):
         print("=" * 70)
         print(f"TEST : {case['label']}")
         print(f"Q    : {case['question']}")
         print("-" * 70)
-
-        initial_state: AgentState = {
-            "messages": [{"role": "user", "content": case["question"]}],
-            "question": case["question"],
-            "retrieved_context": [],
-            "answer": "",
-            "needs_escalation": False,
-            "ticket": {},
-            "tool_calls": 0,
-            "path_taken": "",
-            "ticket_id_to_lookup": None,
-        }
-
-        result = app.invoke(initial_state)
-
-        path = result.get("path_taken", "")
-        ticket = result.get("ticket", {})
-        ticket_id = ticket.get("id", "N/A")
-        ticket_status = ticket.get("status", "N/A")
-
-        if path == "status_lookup":
-            display_path = "STATUS-LOOKUP"
-        elif result["needs_escalation"]:
-            display_path = "ESCALATED"
-        else:
-            display_path = "AUTO-RESOLVED"
-
-        print(f"Path taken       : {display_path}")
-        print(f"Answer:\n{result['answer']}")
+        result = app.invoke(
+            _make_state(case["question"]),
+            config={"configurable": {"thread_id": f"test-{idx}"}},
+        )
+        _print_result(result)
         print()
-        print(f"needs_escalation : {result['needs_escalation']}")
-        print(f"Ticket id        : {ticket_id}")
-        print(f"Ticket status    : {ticket_status}")
-        print(f"Tool calls       : {result.get('tool_calls', 0)}")
 
-        if path != "status_lookup":
-            top_source = (
-                result["retrieved_context"][0]["source_file"]
-                if result["retrieved_context"]
-                else "none"
-            )
-            print(f"Top source chunk : {top_source}")
+    # ── Memory demo: two-turn conversation on the same thread_id ──────────────
+    print("=" * 70)
+    print("MEMORY DEMO: multi-turn conversation with persistent checkpointer")
+    print("=" * 70)
 
-        if path == "status_lookup":
-            found = ticket.get("found")
-            print(f"Ticket found     : {found}")
-            if found:
-                print(f"Ticket question  : {ticket.get('question', '')}")
+    if _checkpointer is None:
+        print("[SKIP] SUPABASE_DB_URL is not set — checkpointer not initialized.")
+        print("       Add the variable to .env and re-run to see memory in action.")
+    else:
+        _THREAD = "memory-demo-1"
+        _cfg = {"configurable": {"thread_id": _THREAD}}
 
-        print(f"Messages in history: {len(result['messages'])}")
-        if ticket.get("error"):
-            print(f"[WARN] Ticket error: {ticket['error']}")
+        # ── Turn 1 ─────────────────────────────────────────────────────────────
+        _Q1 = "What is Supabase Storage?"
+        print(f"\nTurn 1 (thread_id={_THREAD!r})")
+        print(f"Q: {_Q1}")
+        print("-" * 70)
+        _r1 = app.invoke(_make_state(_Q1), config=_cfg)
+        print(f"A: {_r1['answer']}")
+        print(f"   Messages stored in checkpoint: {len(_r1['messages'])}")
+
+        # ── Turn 2 ─────────────────────────────────────────────────────────────
+        # "it" is ambiguous without memory — the agent must recall that "it" refers
+        # to Supabase Storage from the prior turn.
+        _Q2 = "What image formats does it support?"
+        print(f"\nTurn 2 (same thread_id — agent sees Turn 1 history)")
+        print(f"Q: {_Q2}")
+        print("-" * 70)
+        _r2 = app.invoke(_make_state(_Q2), config=_cfg)
+        print(f"A: {_r2['answer']}")
+        print(f"   Messages stored in checkpoint: {len(_r2['messages'])}")
+
+        # ── Proof: show the full message log that Claude saw ───────────────────
+        print("\n── Full message history after Turn 2 ─────────────────────────")
+        for i, msg in enumerate(_r2["messages"], 1):
+            role = msg["role"].upper()
+            snippet = msg["content"][:120].replace("\n", " ")
+            print(f"  [{i}] {role}: {snippet}{'…' if len(msg['content']) > 120 else ''}")
         print()
+        print("Memory proof: Turn 2 answer above should reference 'Storage' or")
+        print("image formats (PNG, JPEG, WebP, etc.) without the question naming it,")
+        print("because the agent read Turn 1's assistant message as conversation context.")
