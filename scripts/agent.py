@@ -1,11 +1,15 @@
 """
-LangGraph agent: classify_intent → (lookup_status | retrieve → generate → check_confidence → resolve | handle_escalation) → END.
+LangGraph agent: classify_intent → (lookup_status | rewrite_query → retrieve → generate → check_confidence → resolve | handle_escalation) → END.
 
 Day 11: adds intent classification for status checks, retry logic with exponential backoff,
         output validation, and a tool-call safety counter.
 Day 12: persistent conversation memory via PostgresSaver checkpointer (Supabase Postgres).
         generate() now includes up to 2 prior turns from state["messages"] so follow-up
         questions like "what image formats does it support?" resolve correctly.
+Day 12 (cont): rewrite_query node resolves coreferences ("it", "they", etc.) in follow-up
+        questions by rewriting them as standalone queries before retrieval.
+        tool_calls is now a plain int (not Annotated[int, operator.add]) so it resets to 0
+        at the start of each new turn instead of accumulating across invocations.
 
 Public API
 ----------
@@ -22,12 +26,13 @@ app  — compiled LangGraph application (with PostgresSaver checkpointer when
 
 AgentState keys in the result dict:
   messages           — full conversation turn history (list of role/content dicts)
-  question           — the original question
+  question           — the original question as submitted
+  search_query       — resolved query used for retrieval (may differ from question)
   retrieved_context  — top-3 reranked chunks (normal Q&A path only)
   answer             — generated or looked-up answer
   needs_escalation   — True when the answer signals low confidence (normal path only)
   ticket             — the ticket row returned from Supabase
-  tool_calls         — cumulative count of Supabase tool invocations in this run
+  tool_calls         — count of Supabase tool invocations in this run (resets each turn)
   path_taken         — "normal" | "status_lookup"
   ticket_id_to_lookup — extracted ticket id (status_lookup path only, else None)
 """
@@ -70,12 +75,13 @@ def _get_client() -> anthropic.Anthropic:
 class AgentState(TypedDict):
     messages: Annotated[list[dict], operator.add]
     question: str
+    search_query: str        # resolved query for retrieval; set by rewrite_query node
     retrieved_context: list[dict]
     answer: str
     needs_escalation: bool
     ticket: dict
-    tool_calls: Annotated[int, operator.add]    # accumulates; LangGraph adds each node's return value
-    path_taken: str                              # "normal" | "status_lookup"
+    tool_calls: int          # plain int so _make_state's 0 resets the checkpointed value
+    path_taken: str          # "normal" | "status_lookup"
     ticket_id_to_lookup: int | None
 
 
@@ -148,8 +154,55 @@ def lookup_status(state: AgentState) -> dict:
     }
 
 
+def rewrite_query(state: AgentState) -> dict:
+    """Resolve coreferences in follow-up questions using conversation history.
+
+    If there are no prior turns, the original question passes through unchanged.
+    Otherwise, calls Haiku to rewrite the question as a fully self-contained query
+    so that retrieval gets "What image formats does Supabase Storage support?"
+    instead of "What image formats does it support?".
+    """
+    question = state["question"]
+    all_msgs = state.get("messages", [])
+    # The last entry in messages is the current user turn; everything before is history.
+    prior_msgs = all_msgs[:-1] if all_msgs else []
+
+    if not prior_msgs:
+        return {"search_query": question}
+
+    history_msgs = prior_msgs[-4:]  # at most 2 full turns (user + assistant each)
+    history_text = "\n".join(
+        f"{m['role'].upper()}: {m['content'][:300]}" for m in history_msgs
+    )
+
+    prompt = (
+        f"Given this conversation history:\n{history_text}\n\n"
+        f"Rewrite this follow-up question as a standalone question that doesn't "
+        f"need the history to understand: {question}\n\n"
+        f"Reply with ONLY the rewritten question, nothing else."
+    )
+
+    try:
+        response = _get_client().messages.create(
+            model=_MODEL,
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        rewritten = next(
+            (block.text.strip() for block in response.content if block.type == "text"),
+            question,
+        )
+        _log.info("Query rewritten: %r → %r", question, rewritten)
+    except Exception as exc:
+        _log.warning("Query rewrite failed (%s); using original question.", exc)
+        rewritten = question
+
+    return {"search_query": rewritten}
+
+
 def retrieve(state: AgentState) -> dict:
-    chunks = reranked_retrieve(state["question"], k=3)
+    query = state.get("search_query") or state["question"]
+    chunks = reranked_retrieve(query, k=3)
     return {"retrieved_context": chunks}
 
 
@@ -250,7 +303,7 @@ def handle_escalation(state: AgentState) -> dict:
 # ── Routing ────────────────────────────────────────────────────────────────────
 
 def _route_after_classify(state: AgentState) -> str:
-    return "lookup_status" if state.get("path_taken") == "status_lookup" else "retrieve"
+    return "lookup_status" if state.get("path_taken") == "status_lookup" else "rewrite_query"
 
 
 def _route_after_confidence(state: AgentState) -> str:
@@ -263,6 +316,7 @@ _builder = StateGraph(AgentState)
 
 _builder.add_node("classify_intent", classify_intent)
 _builder.add_node("lookup_status", lookup_status)
+_builder.add_node("rewrite_query", rewrite_query)
 _builder.add_node("retrieve", retrieve)
 _builder.add_node("generate", generate)
 _builder.add_node("check_confidence", check_confidence)
@@ -273,9 +327,10 @@ _builder.add_edge(START, "classify_intent")
 _builder.add_conditional_edges(
     "classify_intent",
     _route_after_classify,
-    {"lookup_status": "lookup_status", "retrieve": "retrieve"},
+    {"lookup_status": "lookup_status", "rewrite_query": "rewrite_query"},
 )
 _builder.add_edge("lookup_status", END)
+_builder.add_edge("rewrite_query", "retrieve")
 _builder.add_edge("retrieve", "generate")
 _builder.add_edge("generate", "check_confidence")
 _builder.add_conditional_edges(
@@ -320,11 +375,12 @@ def _make_state(question: str) -> AgentState:
     return {
         "messages": [{"role": "user", "content": question}],
         "question": question,
+        "search_query": question,   # rewrite_query will update this when history exists
         "retrieved_context": [],
         "answer": "",
         "needs_escalation": False,
         "ticket": {},
-        "tool_calls": 0,
+        "tool_calls": 0,            # plain int: resets checkpointed value for each new turn
         "path_taken": "",
         "ticket_id_to_lookup": None,
     }
@@ -422,15 +478,25 @@ if __name__ == "__main__":
         print(f"   Messages stored in checkpoint: {len(_r1['messages'])}")
 
         # ── Turn 2 ─────────────────────────────────────────────────────────────
-        # "it" is ambiguous without memory — the agent must recall that "it" refers
-        # to Supabase Storage from the prior turn.
+        # "it" is ambiguous without memory — rewrite_query must resolve "it" to
+        # "Supabase Storage" before retrieval so relevant chunks are fetched.
         _Q2 = "What image formats does it support?"
-        print(f"\nTurn 2 (same thread_id — agent sees Turn 1 history)")
-        print(f"Q: {_Q2}")
+        print(f"\nTurn 2 (same thread_id — rewrite_query resolves 'it' from history)")
+        print(f"Q (raw)          : {_Q2}")
         print("-" * 70)
         _r2 = app.invoke(_make_state(_Q2), config=_cfg)
+        _rewritten = _r2.get("search_query", "?")
+        print(f"Q (rewritten)    : {_rewritten}")
         print(f"A: {_r2['answer']}")
         print(f"   Messages stored in checkpoint: {len(_r2['messages'])}")
+
+        # ── Verify image formats appear in the answer ──────────────────────────
+        _format_keywords = ("png", "jpeg", "jpg", "webp", "gif", "svg")
+        _answer_lower = _r2["answer"].lower()
+        _formats_found = [f for f in _format_keywords if f in _answer_lower]
+        print(f"\n   Image format check: {_formats_found if _formats_found else '[none found — check rewrite]'}")
+        _rewrite_ok = "storage" in _rewritten.lower()
+        print(f"   Rewritten query mentions 'Storage': {_rewrite_ok}")
 
         # ── Proof: show the full message log that Claude saw ───────────────────
         print("\n── Full message history after Turn 2 ─────────────────────────")
@@ -439,6 +505,5 @@ if __name__ == "__main__":
             snippet = msg["content"][:120].replace("\n", " ")
             print(f"  [{i}] {role}: {snippet}{'…' if len(msg['content']) > 120 else ''}")
         print()
-        print("Memory proof: Turn 2 answer above should reference 'Storage' or")
-        print("image formats (PNG, JPEG, WebP, etc.) without the question naming it,")
-        print("because the agent read Turn 1's assistant message as conversation context.")
+        print("Memory proof: 'Q (rewritten)' above should mention 'Supabase Storage'.")
+        print("Turn 2 answer should reference image formats (PNG, JPEG, WebP, etc.).")
