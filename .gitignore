@@ -42,3 +42,4 @@ Thumbs.db
 # Data (large files — commit selectively)
 data/*.json
 data/*.csv
+data/*.pkl
