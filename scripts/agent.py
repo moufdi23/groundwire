@@ -347,6 +347,7 @@ _builder.add_edge("handle_escalation", END)
 # callers that don't set it keep working unchanged.
 
 _checkpointer = None
+_pool = None
 _SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 
 if _SUPABASE_DB_URL:
@@ -355,14 +356,46 @@ if _SUPABASE_DB_URL:
         from psycopg.rows import dict_row
         from langgraph.checkpoint.postgres import PostgresSaver
 
+        # Ensure sslmode=require for Supabase session pooler (port 5432).
+        # Without it the TCP handshake completes but Supabase silently drops the
+        # connection, causing every pool.getconn() to wait the full 30 s timeout.
+        _db_url = _SUPABASE_DB_URL
+        if "sslmode=" not in _db_url:
+            _db_url += ("&" if "?" in _db_url else "?") + "sslmode=require"
+
+        # Log the host so Railway logs confirm which endpoint is in use.
+        # Mask credentials: keep only the host[:port]/dbname portion.
+        try:
+            import urllib.parse as _up
+            _parsed = _up.urlparse(_db_url)
+            _log.info(
+                "DB host in use: %s:%s%s",
+                _parsed.hostname or "?",
+                _parsed.port or 5432,
+                _parsed.path or "",
+            )
+        except Exception:
+            pass
+
+        # open=False + min_size=0: pool is registered but NO connections are opened
+        # at import time.  FastAPI's lifespan (in api.py) calls _pool.open() so
+        # connections are established after the process is up, not during cold start.
         _pool = ConnectionPool(
-            conninfo=_SUPABASE_DB_URL,
+            conninfo=_db_url,
+            min_size=0,
             max_size=5,
-            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            open=False,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+                "connect_timeout": 10,  # fail fast instead of hanging 30 s per attempt
+            },
         )
         _checkpointer = PostgresSaver(_pool)
-        _checkpointer.setup()   # creates langgraph_checkpoints table if not yet present
-        _log.info("PostgresSaver checkpointer ready.")
+        # _checkpointer.setup() is intentionally NOT called here; api.py lifespan
+        # opens the pool and calls setup() after the process is ready.
+        _log.info("PostgresSaver checkpointer created (pool not yet open).")
     except Exception as _exc:
         _log.warning("Checkpointer setup failed (%s); compiling without memory.", _exc)
 
