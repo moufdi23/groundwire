@@ -21,6 +21,7 @@ async def lifespan(app: FastAPI):
     # Open the Postgres connection pool and initialise the checkpointer table
     # here, after the process is fully up, so cold-start latency doesn't cause
     # the pool to time out before any connections are ever attempted.
+    global agent_graph
     pool = _agent_module._pool
     checkpointer = _agent_module._checkpointer
     if pool is not None:
@@ -31,7 +32,12 @@ async def lifespan(app: FastAPI):
                 checkpointer.setup()
                 _log.info("PostgresSaver checkpointer ready.")
         except Exception as exc:
-            _log.warning("Pool/checkpointer startup failed (%s); running without memory.", exc)
+            _log.warning(
+                "Pool/checkpointer startup failed (%s); running stateless (no conversation memory).",
+                exc,
+            )
+            # Recompile without checkpointer so /chat doesn't try to use the broken pool.
+            agent_graph = _agent_module._builder.compile(checkpointer=None)
     yield
     if pool is not None:
         try:
