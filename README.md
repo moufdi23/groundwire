@@ -4,6 +4,18 @@
 
 A production-grade AI support agent built with RAG, tool use, evaluations, and MCP — designed as a portfolio project demonstrating end-to-end LLM system design.
 
+## Current Status
+
+**Backend API**: live on Railway (FastAPI)
+
+**RAG pipeline**: hybrid search (vector + BM25) + cross-encoder reranking — recall@3 = 0.9125
+
+**Agent**: LangGraph with 3 tools — `create_ticket`, `check_status`, `escalate_to_human`
+
+**CI gate**: runs on every push; enforces recall@3 ≥ 0.88, recall@10 ≥ 0.95, precision@3 ≥ 0.75
+
+**Known issue**: conversation memory (PostgresSaver) works locally but falls back to stateless on Railway due to a Supabase pooler connectivity issue — agent remains functional, history is not persisted between sessions
+
 ## What it does
 
 Answers questions about Supabase documentation using a retrieval-augmented generation pipeline: documents are embedded, stored in Postgres with pgvector, and retrieved at query time to ground the agent's responses.
