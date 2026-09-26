@@ -1,8 +1,10 @@
+import os
 import uuid
 import requests
 import streamlit as st
 
-API_URL = "http://127.0.0.1:8000/chat"
+_default_url = "http://127.0.0.1:8000/chat"
+API_URL = st.secrets.get("API_URL", os.environ.get("API_URL", _default_url))
 
 st.set_page_config(page_title="Groundwire — Supabase Support Agent", page_icon="🔌")
 st.title("Groundwire — Supabase Support Agent")
@@ -51,7 +53,7 @@ if user_input:
                     "ticket_id": data.get("ticket_id"),
                 }
             except requests.exceptions.ConnectionError:
-                answer = "Backend not reachable — is uvicorn running? (`uvicorn scripts.api:app --reload`)"
+                answer = f"Backend not reachable at `{API_URL}` — check that the Railway service is up."
                 meta = None
             except requests.exceptions.Timeout:
                 answer = "Request timed out after 60 s. The agent may still be processing — try again."
