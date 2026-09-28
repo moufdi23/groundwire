@@ -4,6 +4,13 @@
 
 A production-grade AI support agent built with RAG, tool use, evaluations, and MCP — designed as a portfolio project demonstrating end-to-end LLM system design.
 
+## Live Demo
+
+Full stack RAG agent — try it live, no setup required.
+
+- **App**: https://groundwire-4sqvljw4mrbiaadzxacrmd.streamlit.app
+- **API docs**: https://web-production-29e6ca.up.railway.app/docs
+
 ## Current Status
 
 **Backend API**: live on Railway (FastAPI)
