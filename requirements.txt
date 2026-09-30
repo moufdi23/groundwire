@@ -39,3 +39,9 @@ uvicorn[standard]>=0.30.0
 
 # Day 14: Streamlit chat UI
 streamlit>=1.35.0
+
+# Day 15: MCP server
+# mcp 2.x is pure-Python (no C extensions); pywin32 cp314 wheel ships for Windows.
+# API note: mcp 2.x renamed FastMCP -> MCPServer (mcp.server.mcpserver.MCPServer).
+# The [cli] extra installs the `mcp` CLI used by MCP Inspector.
+mcp[cli]>=2.0.0
