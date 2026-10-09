@@ -10,18 +10,27 @@ The server registers three tools:
     check_status           — look up a ticket by id
 """
 
+import logging
 import sys
 from pathlib import Path
+
+# MCP uses stdio for JSON-RPC; any incidental output must go to stderr.
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 # Make sibling scripts importable when run from any working directory.
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mcp.server.mcpserver import MCPServer
-
-from reranked_search import reranked_retrieve
-from tools import create_ticket as _create_ticket, check_status as _check_status
+from tools import (
+    create_ticket as _create_ticket,
+    check_status as _check_status,
+    escalate_to_human as _escalate_to_human,
+)
 
 mcp = MCPServer("groundwire")
+
+# Lazy handle — populated on first search_knowledge_base call.
+_reranked_retrieve = None
 
 CONTENT_PREVIEW = 500  # characters shown per chunk to keep payloads readable
 
@@ -44,7 +53,11 @@ def search_knowledge_base(query: str, k: int = 3) -> list[dict]:
         query: Natural-language question or search phrase.
         k: Number of results to return (default 3, max recommended 10).
     """
-    raw = reranked_retrieve(query, k=k)
+    global _reranked_retrieve
+    if _reranked_retrieve is None:
+        from reranked_search import reranked_retrieve  # noqa: PLC0415
+        _reranked_retrieve = reranked_retrieve
+    raw = _reranked_retrieve(query, k=k)
     return [
         {
             "source_file": r["source_file"],
@@ -57,21 +70,37 @@ def search_knowledge_base(query: str, k: int = 3) -> list[dict]:
 
 
 @mcp.tool()
-def create_ticket(question: str, answer: str) -> dict:
+def create_ticket(
+    question: str,
+    answer: str,
+    resolved: bool = False,
+    reason: str = "",
+) -> dict:
     """
-    Log a resolved Q&A pair as a support ticket in the groundwire Supabase database.
+    Log a support interaction as a ticket in the groundwire Supabase database.
 
-    Creates a ticket with status='auto_resolved' and returns the full ticket row,
-    including the auto-assigned ticket id.
+    By default (resolved=False) the ticket is created with status='escalated' so a
+    human agent will review it.  Set resolved=True only when you are confident the
+    answer fully solves the user's problem; the ticket is then stored as
+    status='auto_resolved'.
 
-    Use this tool after successfully answering a user's support question, so the
-    interaction is recorded for audit or follow-up.
+    When to use each value:
+      resolved=False (default) — use whenever the answer may be incomplete, the user
+        expressed doubt, the question was outside the knowledge base, or you are unsure.
+        Optionally supply a reason so the human reviewer understands why it was flagged.
+      resolved=True — use only after a clear, complete answer was confirmed by the user.
+
+    Returns the full ticket row including the auto-assigned ticket id.
 
     Args:
         question: The user's original question.
         answer: The answer that was provided.
+        resolved: False (default) creates an escalated ticket; True marks it auto_resolved.
+        reason: Optional human-readable explanation for escalation (ignored when resolved=True).
     """
-    return _create_ticket(question, answer)
+    if resolved:
+        return _create_ticket(question, answer)
+    return _escalate_to_human(question, answer, reason or "Flagged for human review")
 
 
 @mcp.tool()
