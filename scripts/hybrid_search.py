@@ -17,16 +17,15 @@ Run standalone to smoke-test:
 import os
 import pickle
 import re
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 from supabase import create_client
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
-INDEX_PATH = Path("data/bm25_index.pkl")
+INDEX_PATH = PROJECT_ROOT / "data" / "bm25_index.pkl"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_POOL = 50   # candidates fetched from vector search before fusion
 BM25_POOL = 50     # candidates fetched from BM25 before fusion
@@ -49,18 +48,19 @@ def _ensure_initialized() -> None:
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SECRET_KEY")
         if not url or not key:
-            sys.exit("Missing SUPABASE_URL or SUPABASE_SECRET_KEY in environment.")
+            raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY in environment.")
         _supabase_client = create_client(url, key)
 
     if _bm25 is None:
         if not INDEX_PATH.exists():
-            sys.exit(f"BM25 index not found at {INDEX_PATH}. Run build_bm25_index.py first.")
+            raise FileNotFoundError(f"BM25 index not found at {INDEX_PATH}. Run build_bm25_index.py first.")
         with open(INDEX_PATH, "rb") as f:
             payload = pickle.load(f)
         _bm25 = payload["bm25"]
         _chunk_ids = payload["chunk_ids"]
 
     if _model is None:
+        from sentence_transformers import SentenceTransformer  # noqa: PLC0415
         _model = SentenceTransformer(MODEL_NAME)
 
 

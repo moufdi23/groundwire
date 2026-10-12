@@ -53,6 +53,42 @@ pip install -r requirements.txt
 cp .env.example .env         # then fill in your Supabase credentials
 ```
 
+## Use it from Claude Desktop (MCP)
+
+The MCP server exposes three tools that Claude Desktop can call directly:
+
+| Tool | What it does |
+|---|---|
+| `search_knowledge_base` | Semantic + keyword search over the Supabase docs corpus |
+| `create_ticket` | Opens a support ticket with a summary and priority level |
+| `check_status` | Looks up the status of an existing ticket by ID |
+
+**Setup**
+
+1. Open Claude Desktop → **Settings → Developer → Edit Config**
+2. Add the following block to `claude_desktop_config.json`, replacing every `YOUR_*` placeholder with your actual values:
+
+```json
+{
+  "mcpServers": {
+    "groundwire": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "/absolute/path/to/groundwire",
+      "env": {
+        "SUPABASE_URL": "YOUR_SUPABASE_URL",
+        "SUPABASE_KEY": "YOUR_SUPABASE_SERVICE_ROLE_KEY",
+        "ANTHROPIC_API_KEY": "YOUR_ANTHROPIC_API_KEY"
+      }
+    }
+  }
+}
+```
+
+3. Restart Claude Desktop. You should see the three tools listed in the tool picker.
+
+> **Note:** The first `search_knowledge_base` call in a session will be slow (5–15 s) while the embedding model loads into memory. Subsequent calls are fast.
+
 ## Day-by-day build log
 
 - **Day 1**: Project scaffold, Supabase connection, corpus download

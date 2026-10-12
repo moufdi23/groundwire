@@ -16,8 +16,6 @@ Run standalone to smoke-test:
 import sys
 from pathlib import Path
 
-from sentence_transformers import CrossEncoder
-
 # Ensure hybrid_search is importable when this script is run directly.
 sys.path.insert(0, str(Path(__file__).parent))
 from hybrid_search import hybrid_retrieve
@@ -31,6 +29,7 @@ _cross_encoder = None
 def _ensure_cross_encoder() -> None:
     global _cross_encoder
     if _cross_encoder is None:
+        from sentence_transformers import CrossEncoder  # noqa: PLC0415
         _cross_encoder = CrossEncoder(RERANKER_MODEL)
 
 

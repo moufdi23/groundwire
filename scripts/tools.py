@@ -10,11 +10,12 @@ an 'error' key on failure so the agent can include the message in its response.
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _TABLE = "tickets"
 
